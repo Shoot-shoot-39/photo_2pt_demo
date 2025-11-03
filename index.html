@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>写真方位線ツール（スマホ縦配置＋操作ボタン）</title>
+  <title>写真方位線ツール（撮影位置固定＋スマホ対応）</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
     body { font-family: sans-serif; margin: 0; display: flex; flex-direction: column; align-items: center; }
     #imageContainer { width: 100%; text-align: center; margin-top: 10px; }
-    #uploadedImage { max-width: 95%; height: auto; border: 1px solid #ccc; }
+    #photoCanvas { max-width: 95%; height: auto; border: 1px solid #ccc; }
     #map { width: 95%; height: 400px; margin-top: 10px; }
     #info { width: 95%; font-size: 14px; margin: 10px 0; text-align: center; }
     input[type="file"] { margin: 10px; }
@@ -17,7 +17,7 @@
   </style>
 </head>
 <body>
-  <h2>📸 写真方位線ツール（スマホ対応）</h2>
+  <h2>📸 写真方位線ツール（撮影位置固定版）</h2>
 
   <input type="file" id="photoInput" accept="image/*"><br>
 
@@ -30,7 +30,11 @@
     <button id="clearMap">地図線クリア</button>
   </div>
 
-  <div id="info">画像をアップロードし、<b>2点</b>をタップして方位を求めてください。<br>その後、地図上で基準点をタップすると150kmの方位線を描きます。</div>
+  <div id="info">
+    画像をアップロードし、<b>2点</b>をタップして相対角度を求めてください。<br>
+    地図は撮影位置を中心に表示します。<br>
+    地図上をタップして、<b>1点目の位置</b>を指定すると150km方位線を描きます。
+  </div>
 
   <div id="map"></div>
 
@@ -42,14 +46,36 @@
     let ctx = canvas.getContext('2d');
     let points = [];
     let focal35 = 28; // iPhone SE2相当の35mm換算焦点距離
-    let gpsImgDir = null;
+    let gpsImgDir = 0;
+    let photoLat = null;
+    let photoLon = null;
+
+    const map = L.map('map').setView([35.6812, 139.7671], 8);
+    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+      attribution: '地理院地図'
+    }).addTo(map);
+
+    let drawnLines = [];
 
     document.getElementById('photoInput').addEventListener('change', e => {
       const file = e.target.files[0];
       if (!file) return;
       EXIF.getData(file, function() {
-        gpsImgDir = EXIF.getTag(this, 'GPSImgDirection');
+        gpsImgDir = EXIF.getTag(this, 'GPSImgDirection') || 0;
+        const lat = EXIF.getTag(this, 'GPSLatitude');
+        const lon = EXIF.getTag(this, 'GPSLongitude');
+        const latRef = EXIF.getTag(this, 'GPSLatitudeRef') || 'N';
+        const lonRef = EXIF.getTag(this, 'GPSLongitudeRef') || 'E';
+        if (lat && lon) {
+          photoLat = (lat[0] + lat[1] / 60 + lat[2] / 3600) * (latRef === 'S' ? -1 : 1);
+          photoLon = (lon[0] + lon[1] / 60 + lon[2] / 3600) * (lonRef === 'W' ? -1 : 1);
+          map.setView([photoLat, photoLon], 12);
+          L.marker([photoLat, photoLon]).addTo(map).bindPopup('📷 撮影位置');
+        } else {
+          alert('撮影位置情報が見つかりません。地図の中心は東京駅に設定されます。');
+        }
       });
+
       const reader = new FileReader();
       reader.onload = ev => {
         img.onload = () => {
@@ -85,14 +111,6 @@
       alert(`相対角度: ${relativeAngle.toFixed(2)}°`);
     }
 
-    // Leaflet地図
-    const map = L.map('map').setView([35.6812, 139.7671], 8);
-    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
-      attribution: '地理院地図'
-    }).addTo(map);
-
-    let drawnLines = [];
-
     function drawDirectionLine(lat, lon, bearing, lengthMeters) {
       const R = 6371000;
       const brngRad = bearing * Math.PI / 180;
@@ -111,11 +129,16 @@
         alert('先に画像上で2点を指定してください。');
         return;
       }
-      const baseLat = e.latlng.lat;
-      const baseLon = e.latlng.lng;
+      if (photoLat == null || photoLon == null) {
+        alert('撮影位置情報がありません。');
+        return;
+      }
+      const targetLat = e.latlng.lat;
+      const targetLon = e.latlng.lng;
       const baseDir = gpsImgDir || 0;
       const finalBearing = (baseDir + relativeAngle + 360) % 360;
-      drawDirectionLine(baseLat, baseLon, finalBearing, 150000);
+      drawDirectionLine(photoLat, photoLon, finalBearing, 150000);
+      L.marker([targetLat, targetLon]).addTo(map).bindPopup('1点目の地上位置');
     });
 
     document.getElementById('resetPoints').addEventListener('click', () => {
