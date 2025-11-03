@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>写真方位線ツール（撮影位置固定＋スマホ対応）</title>
+  <title>写真方位線ツール（撮影位置固定＋高解像度対応）</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
     body { font-family: sans-serif; margin: 0; display: flex; flex-direction: column; align-items: center; }
     #imageContainer { width: 100%; text-align: center; margin-top: 10px; }
-    #photoCanvas { max-width: 95%; height: auto; border: 1px solid #ccc; }
+    #photoCanvas { width: 95%; height: auto; border: 1px solid #ccc; max-width: 800px; }
     #map { width: 95%; height: 400px; margin-top: 10px; }
     #info { width: 95%; font-size: 14px; margin: 10px 0; text-align: center; }
     input[type="file"] { margin: 10px; }
@@ -17,7 +17,7 @@
   </style>
 </head>
 <body>
-  <h2>📸 写真方位線ツール（撮影位置固定版）</h2>
+  <h2>📸 写真方位線ツール（撮影位置固定＋高解像度対応）</h2>
 
   <input type="file" id="photoInput" accept="image/*"><br>
 
@@ -26,8 +26,9 @@
   </div>
 
   <div id="controls">
-    <button id="resetPoints">リセット</button>
+    <button id="resetPoints">画像上の点リセット</button>
     <button id="clearMap">地図線クリア</button>
+    <button id="fullReset">🧹 全リセット</button>
   </div>
 
   <div id="info">
@@ -45,17 +46,15 @@
     let canvas = document.getElementById('photoCanvas');
     let ctx = canvas.getContext('2d');
     let points = [];
-    let focal35 = 28; // iPhone SE2相当の35mm換算焦点距離（デフォルト）
+    let focal35 = 28;
     let gpsImgDir = 0;
     let photoLat = null;
     let photoLon = null;
 
     const map = L.map('map').setView([35.6812, 139.7671], 8);
-    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
-      attribution: '地理院地図'
-    }).addTo(map);
-
+    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', { attribution: '地理院地図' }).addTo(map);
     let drawnLines = [];
+    let markers = [];
 
     document.getElementById('photoInput').addEventListener('change', e => {
       const file = e.target.files[0];
@@ -68,15 +67,13 @@
         const latRef = EXIF.getTag(this, 'GPSLatitudeRef') || 'N';
         const lonRef = EXIF.getTag(this, 'GPSLongitudeRef') || 'E';
         if (lat && lon) {
-          // EXIF returns rationals sometimes
-          function toNum(v){ return (v[0].numerator ? v.map(x=>x.numerator/x.denominator) : v); }
+          function toNum(v){ return (v[0] && v[0].numerator!==undefined) ? v.map(x=>x.numerator/x.denominator) : v; }
           const la = toNum(lat), lo = toNum(lon);
           photoLat = (la[0] + la[1] / 60 + la[2] / 3600) * (latRef === 'S' ? -1 : 1);
           photoLon = (lo[0] + lo[1] / 60 + lo[2] / 3600) * (lonRef === 'W' ? -1 : 1);
           map.setView([photoLat, photoLon], 12);
-          L.marker([photoLat, photoLon]).addTo(map).bindPopup('📷 撮影位置');
-        } else {
-          // keep default center
+          const m = L.marker([photoLat, photoLon]).addTo(map).bindPopup('📷 撮影位置');
+          markers.push(m);
         }
         const f35 = EXIF.getTag(this, 'FocalLengthIn35mmFilm');
         if(f35) focal35 = parseFloat(f35);
@@ -85,12 +82,9 @@
       const reader = new FileReader();
       reader.onload = ev => {
         img.onload = () => {
-          // scale canvas for mobile display but keep coordinate mapping
-          const maxDisplayW = Math.min(window.innerWidth * 0.95, 800);
-          const aspect = img.naturalWidth ? img.naturalHeight / img.naturalWidth : 0.75;
-          canvas.width = Math.round(maxDisplayW);
-          canvas.height = Math.round(maxDisplayW * aspect);
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          ctx.drawImage(img, 0, 0);
         };
         img.src = ev.target.result;
       };
@@ -100,39 +94,49 @@
     canvas.addEventListener('click', e => {
       if (!img.src) return;
       const rect = canvas.getBoundingClientRect();
-      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-      const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const x = (e.clientX - rect.left) * scaleX;
+      const y = (e.clientY - rect.top) * scaleY;
       if(points.length >= 2) points = [];
       points.push({x, y});
       drawImageWithMarkers();
-      if (points.length === 2) calculateAngle();
+      if (points.length === 2) calculateAngleAndShow();
     });
 
     function drawImageWithMarkers(){
       ctx.clearRect(0,0,canvas.width,canvas.height);
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
       points.forEach((p,i)=>{
         ctx.fillStyle = i===0 ? 'red' : 'blue';
-        ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, Math.PI*2); ctx.fill();
-        ctx.fillStyle = '#fff'; ctx.font='12px sans-serif'; ctx.fillText(String(i+1), p.x-4, p.y+4);
+        ctx.beginPath(); ctx.arc(p.x, p.y, 20, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font='36px sans-serif'; ctx.fillText(String(i+1), p.x-10, p.y+10);
       });
     }
 
     let camAngles = {a1:0, a2:0};
     let relativeAngle = null;
 
-    function calculateAngle(){
-      // compute horizontal FOV from 35mm equivalent focal length
-      const f35 = focal35 || 28; // fallback
-      const hfov = 2 * Math.atan(36 / (2 * f35)); // radians (full-frame)
+    function calculateAngleAndShow(){
+      const f35 = focal35 || 28;
+      const hfov = 2 * Math.atan(36 / (2 * f35));
       const fx_pixels = (canvas.width / 2) / Math.tan(hfov / 2);
       const cx = canvas.width / 2;
       const x1 = points[0].x; const x2 = points[1].x;
-      const ang1 = Math.atan2(x1 - cx, fx_pixels) * 180 / Math.PI; // deg, right positive
+      const ang1 = Math.atan2(x1 - cx, fx_pixels) * 180 / Math.PI;
       const ang2 = Math.atan2(x2 - cx, fx_pixels) * 180 / Math.PI;
       camAngles.a1 = ang1; camAngles.a2 = ang2;
-      relativeAngle = ang2 - ang1; // point2 relative to point1
-      alert(`点1角度: ${ang1.toFixed(3)}°, 点2角度: ${ang2.toFixed(3)}°, 相対角: ${relativeAngle.toFixed(3)}°`);
+      relativeAngle = ang2 - ang1;
+      alert(`水平角：${relativeAngle.toFixed(3)}°`);
+    }
+
+    function computeGeoBearing(lat1, lon1, lat2, lon2){
+      const φ1 = lat1 * Math.PI/180; const φ2 = lat2 * Math.PI/180;
+      const λ1 = lon1 * Math.PI/180; const λ2 = lon2 * Math.PI/180;
+      const y = Math.sin(λ2-λ1)*Math.cos(φ2);
+      const x = Math.cos(φ1)*Math.sin(φ2) - Math.sin(φ1)*Math.cos(φ2)*Math.cos(λ2-λ1);
+      const θ = Math.atan2(y,x);
+      return (θ*180/Math.PI + 360) % 360;
     }
 
     function drawDirectionLine(lat, lon, bearing, lengthMeters) {
@@ -151,23 +155,37 @@
     map.on('click', e => {
       if (points.length < 2) { alert('まず画像上で2点を指定してください'); return; }
       if (photoLat == null || photoLon == null) { alert('撮影位置がEXIFにありません'); return; }
-      // Use camera heading (gpsImgDir) as heading of image center
-      const camHeading = gpsImgDir || 0;
-      // Absolute bearing to point2 should be camHeading + angle_of_point2
-      const absoluteBearing = (camHeading + camAngles.a2 + 360) % 360;
+      const userLat = e.latlng.lat; const userLon = e.latlng.lng;
+      const bearingPhotoToP1 = computeGeoBearing(photoLat, photoLon, userLat, userLon);
+      // 修正版：相対角度の符号を正しく扱う
+      const absoluteBearing = (bearingPhotoToP1 - (camAngles.a1 - camAngles.a2) + 360) % 360;
       drawDirectionLine(photoLat, photoLon, absoluteBearing, 150000);
-      // mark the user-chosen map point (point1 location)
-      L.marker([e.latlng.lat, e.latlng.lng]).addTo(map).bindPopup('点1の地上位置').openPopup();
+      const m = L.marker([userLat, userLon]).addTo(map).bindPopup('点1の地上位置').openPopup();
+      markers.push(m);
     });
 
     document.getElementById('resetPoints').addEventListener('click', () => {
       points = []; relativeAngle = null; camAngles = {a1:0,a2:0};
-      if(img.src) { ctx.clearRect(0,0,canvas.width,canvas.height); ctx.drawImage(img, 0, 0, canvas.width, canvas.height); }
+      if(img.src) { ctx.clearRect(0,0,canvas.width,canvas.height); ctx.drawImage(img, 0, 0); }
     });
 
     document.getElementById('clearMap').addEventListener('click', () => {
       drawnLines.forEach(line => map.removeLayer(line));
-      drawnLines = [];
+      markers.forEach(m => map.removeLayer(m));
+      drawnLines = []; markers = [];
+    });
+
+    document.getElementById('fullReset').addEventListener('click', () => {
+      points = []; relativeAngle = null; camAngles = {a1:0,a2:0};
+      photoLat = null; photoLon = null; gpsImgDir = 0;
+      drawnLines.forEach(line => map.removeLayer(line));
+      markers.forEach(m => map.removeLayer(m));
+      drawnLines = []; markers = [];
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      canvas.width = canvas.height = 0;
+      document.getElementById('photoInput').value = '';
+      map.setView([35.6812, 139.7671], 8);
+      alert('すべてリセットしました。');
     });
   </script>
 </body>
