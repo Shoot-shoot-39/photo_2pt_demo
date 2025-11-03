@@ -1,115 +1,249 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>写真から方位線を描画（地理院地図連動）</title>
-<style>
-  body { font-family: sans-serif; margin: 1em; }
-  #canvasContainer { position: relative; }
-  canvas { max-width: 100%; border: 1px solid #ccc; cursor: crosshair; }
-  #map { height: 500px; margin-top: 1em; }
-</style>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>写真の2点→地図上で基準点指定→方位線表示（150km）</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:12px}
+  h1{font-size:18px}
+  #top{display:flex;gap:16px;align-items:flex-start}
+  #panel{width:420px}
+  #canvasWrap{border:1px solid #ddd;padding:6px;display:inline-block}
+  canvas{max-width:400px;border:1px solid #bbb;cursor:crosshair}
+  #map{height:540px;margin-top:12px;border:1px solid #ccc}
+  .small{font-size:13px;color:#444}
+  label{display:block;margin-top:8px}
+  input[type=number]{width:120px}
+  button{margin-top:8px}
+  .info{background:#f7f7f7;padding:8px;border-radius:6px;margin-top:8px}
+</style>
 </head>
 <body>
-<h2>📷 写真から方位線を描画（地理院地図連動）</h2>
-<input type="file" id="fileInput" accept="image/*"><br><br>
-<canvas id="photoCanvas"></canvas>
-<div id="map"></div>
+<h1>写真の2点 → 地図で基準点指定 → 方位線（150km）表示</h1>
+<p class="small">手順：① 写真をアップロード ② 画像上で点1（基準）と点2（方位）をクリック ③ 地図上で点1の実座標をクリック → 地図に150kmの方位線を描きます。EXIFの撮影方位があれば自動で使います。無ければカメラ方位を手入力してください。</p>
 
+<div id="top">
+  <div id="panel">
+    <label>1) 写真（JPEG）を選択</label>
+    <input id="file" type="file" accept="image/*"><br>
+
+    <div id="canvasWrap">
+      <canvas id="canvas" width="400" height="300'></canvas>
+    </div>
+
+    <div class="info">
+      <div><b>EXIF 情報</b></div>
+      <div id="exifGPS">GPS: —</div>
+      <div id="exifHeading">撮影方位: —</div>
+      <div id="exifF35">35mm換算焦点距離: —</div>
+    </div>
+
+    <label>カメラ方位(北=0°, 時計回り)（EXIFが無ければ入力）</label>
+    <input id="headingInput" type="number" step="0.1" placeholder="例: 12.3">
+
+    <label>35mm換算焦点距離 (mm)（EXIFが無ければ入力）</label>
+    <input id="f35" type="number" step="0.1" placeholder="例: 28">
+
+    <div class="small" style="margin-top:8px">操作メモ：画像上で2点をクリック（順番は任意）。点1が地図で指定する基準点に対応します。</div>
+    <button id="clearBtn">リセット（画像とマーカーをクリア）</button>
+  </div>
+
+  <div style="flex:1">
+    <div id="map"></div>
+    <div class="small" style="margin-top:8px">地図上をクリックして <b>点1（基準点）の実座標</b> を指定してください。指定後、自動で150kmの方位線を描きます。</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 <script>
-const canvas = document.getElementById('photoCanvas');
+// --- UI elements ---
+const fileInput = document.getElementById('file');
+const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const exifGPS = document.getElementById('exifGPS');
+const exifHeading = document.getElementById('exifHeading');
+const exifF35 = document.getElementById('exifF35');
+const headingInput = document.getElementById('headingInput');
+const f35Input = document.getElementById('f35');
+const clearBtn = document.getElementById('clearBtn');
+
 let img = new Image();
-let points = [];
-let exifData = {};
-let photoLat = null, photoLon = null, photoDir = null, focal35 = null;
+let natW=0, natH=0;
+let clicks = []; // [{x,y}] in natural image coords
+let exif = {};
 
-// Leaflet 地理院地図初期化
-const map = L.map('map').setView([35.681236, 139.767125], 5);
-L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
-  attribution: '地理院地図'
-}).addTo(map);
+// --- Leaflet map (地理院地図) ---
+const map = L.map('map').setView([35.68,139.77], 10);
+L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', { attribution: '地理院地図' }).addTo(map);
+let baseMarker = null;
+let dirLayerGroup = L.layerGroup().addTo(map);
 
-// ファイル選択時
+// --- helpers ---
+function toDegFromDMS(dms, ref){
+  if(!dms) return null;
+  // dms is array of rationals or numbers
+  const parts = dms.map(p => (p.numerator!==undefined ? p.numerator/p.denominator : p));
+  let deg = parts[0] + parts[1]/60 + parts[2]/3600;
+  if(ref === 'S' || ref === 'W') deg = -deg;
+  return deg;
+}
+
+function resetAll(){
+  clicks = [];
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(img.src){ drawImageOnCanvas(); }
+  exifGPS.textContent = 'GPS: —';
+  exifHeading.textContent = '撮影方位: —';
+  exifF35.textContent = '35mm換算焦点距離: —';
+  headingInput.value = '';
+  f35Input.value = '';
+  dirLayerGroup.clearLayers();
+  if(baseMarker){ map.removeLayer(baseMarker); baseMarker=null; }
+}
+
+clearBtn.addEventListener('click', resetAll);
+
+// file input
 fileInput.addEventListener('change', e => {
+  resetAll();
   const file = e.target.files[0];
-  if (!file) return;
+  if(!file) return;
   const reader = new FileReader();
-  reader.onload = function(evt) {
-    img.onload = function() {
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.drawImage(img, 0, 0);
+  reader.onload = ev => {
+    img.onload = function(){
+      natW = img.naturalWidth; natH = img.naturalHeight;
+      // fit canvas to 400px width while keeping aspect ratio for display, but keep natural coords
+      const displayW = 400;
+      const displayH = Math.round(natH * (displayW / natW));
+      canvas.width = displayW; canvas.height = displayH;
+      drawImageOnCanvas();
     }
-    img.src = evt.target.result;
+    img.src = ev.target.result;
   }
   reader.readAsDataURL(file);
 
-  EXIF.getData(file, function() {
-    exifData = EXIF.getAllTags(this);
-    photoLat = EXIF.getTag(this, 'GPSLatitude');
-    photoLon = EXIF.getTag(this, 'GPSLongitude');
-    photoDir = EXIF.getTag(this, 'GPSImgDirection');
-    focal35 = EXIF.getTag(this, 'FocalLengthIn35mmFilm');
-
-    function toDeg(arr, ref) {
-      if (!arr) return null;
-      let deg = arr[0] + arr[1]/60 + arr[2]/3600;
-      if (ref === 'S' || ref === 'W') deg *= -1;
-      return deg;
-    }
-
+  // read EXIF
+  EXIF.getData(file, function(){
+    exif = EXIF.getAllTags(this) || {};
+    // GPS
+    const lat = EXIF.getTag(this, 'GPSLatitude');
     const latRef = EXIF.getTag(this, 'GPSLatitudeRef');
+    const lon = EXIF.getTag(this, 'GPSLongitude');
     const lonRef = EXIF.getTag(this, 'GPSLongitudeRef');
-    photoLat = toDeg(photoLat, latRef);
-    photoLon = toDeg(photoLon, lonRef);
-
-    console.log('EXIF:', {photoLat, photoLon, photoDir, focal35});
+    const gpsLat = toDegFromDMS(lat, latRef);
+    const gpsLon = toDegFromDMS(lon, lonRef);
+    if(gpsLat && gpsLon){ exifGPS.textContent = 'GPS: ' + gpsLat.toFixed(6) + ', ' + gpsLon.toFixed(6); }
+    // heading
+    let hd = EXIF.getTag(this, 'GPSImgDirection') || EXIF.getTag(this,'ImageDirection') || EXIF.getTag(this,'GPSDestBearing');
+    if(hd){ if(typeof hd === 'object' && hd.numerator!==undefined) hd = hd.numerator/hd.denominator; exifHeading.textContent = '撮影方位: ' + Number(hd).toFixed(1) + '°'; headingInput.value = Number(hd).toFixed(1); }
+    // 35mm equivalent focal
+    let f35 = EXIF.getTag(this, 'FocalLengthIn35mmFilm');
+    if(f35){ exifF35.textContent = '35mm換算焦点距離: ' + f35 + ' mm'; f35Input.value = f35; }
+    // store raw
+    exif._gpsLat = gpsLat; exif._gpsLon = gpsLon; exif._heading = hd; exif._f35 = f35;
   });
 });
 
+function drawImageOnCanvas(){
+  // draw scaled image to canvas
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  // redraw markers
+  clicks.forEach((p,i)=>{
+    const d = markerSize();
+    ctx.fillStyle = i===0 ? 'rgba(255,60,60,0.9)' : 'rgba(30,144,255,0.95)';
+    ctx.beginPath(); ctx.arc(p.x, p.y, d, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = '12px sans-serif'; ctx.fillText(String(i+1), p.x-4, p.y+4);
+  });
+}
+
+function markerSize(){ return Math.max(6, Math.round(canvas.width/40)); }
+
+// click on canvas
 canvas.addEventListener('click', e => {
-  if (!img.src) return;
+  if(!img.src) return;
   const rect = canvas.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const y = e.clientY - rect.top;
-  points.push({x, y});
-
-  ctx.drawImage(img, 0, 0);
-  ctx.fillStyle = 'red';
-  points.forEach(p => ctx.fillRect(p.x-4, p.y-4, 8, 8));
-
-  if (points.length === 2) {
-    calcAndDrawDirection();
+  // save in displayed coords
+  if(clicks.length >= 2) clicks = [];
+  clicks.push({x,y});
+  drawImageOnCanvas();
+  if(clicks.length === 2){
+    // compute and show relative angle
+    const rel = computeRelativeAngle();
+    alert('点1→点2 の相対水平角: ' + rel.toFixed(3) + '° （正は右方向）\n\n次に地図上で点1の実座標をクリックしてください。');
   }
 });
 
-function calcAndDrawDirection() {
-  const dx = points[1].x - points[0].x;
-  const dy = points[1].y - points[0].y;
-  const anglePx = Math.atan2(-dx, -dy) * 180 / Math.PI; // 画像上の角度
-
-  let bearing = 0;
-  if (photoDir != null) {
-    bearing = (photoDir + anglePx + 360) % 360;
-  } else {
-    bearing = (anglePx + 360) % 360;
+// compute relative horizontal angle (degrees). positive means point2 is to the right of point1 relative to camera forward.
+function computeRelativeAngle(){
+  // use 35mm equivalent focal length to compute horizontal FOV
+  let f35 = parseFloat(f35Input.value);
+  if(isNaN(f35)){
+    if(exif._f35) f35 = exif._f35;
   }
-
-  if (photoLat && photoLon) {
-    drawDirectionLine(photoLat, photoLon, bearing, 150000); // 150km
-  } else {
-    alert('EXIFにGPS情報がありません');
+  if(isNaN(f35)){
+    alert('35mm換算焦点距離が不明です。EXIFか入力欄に値を入れてください。');
+    return 0;
   }
+  // assume full-frame sensor width = 36mm for 35mm equivalent
+  const hfov = 2 * Math.atan(36 / (2 * f35)); // radians
+  const fx_pixels = (canvas.width / 2) / Math.tan(hfov/2);
+  const cx = canvas.width/2;
 
-  points = [];
+  // pixel angles relative to camera forward (deg). right positive
+  const x1 = clicks[0].x; const x2 = clicks[1].x;
+  const ang1 = Math.atan2(x1 - cx, fx_pixels) * 180/Math.PI;
+  const ang2 = Math.atan2(x2 - cx, fx_pixels) * 180/Math.PI;
+  const rel = ang2 - ang1; // positive: point2 is to the right of point1
+  // store angles for later
+  clicks[0].angle = ang1; clicks[1].angle = ang2;
+  return rel;
 }
 
-function drawDirectionLine(lat, lon, bearingDeg, dist=150000) {
+// map click sets base point corresponding to photo point1
+map.on('click', function(e){
+  if(!img.src || clicks.length < 1){ alert('まずは写真をアップロードして、画像上で点1をクリックしてください。'); return; }
+  const lat = e.latlng.lat, lon = e.latlng.lng;
+  if(baseMarker){ map.removeLayer(baseMarker); baseMarker = null; }
+  baseMarker = L.marker([lat, lon]).addTo(map).bindPopup('基準点（写真の点1）').openPopup();
+
+  // we need at least two points to draw direction to point2
+  if(clicks.length < 2){ alert('画像上で点1と点2の両方をクリックしてから地図上で点1の座標を指定してください。'); return; }
+
+  // determine camera heading
+  let camHeading = parseFloat(headingInput.value);
+  if(isNaN(camHeading)){
+    if(exif._heading !== undefined && exif._heading !== null){ camHeading = exif._heading; }
+  }
+  if(isNaN(camHeading)){
+    const ok = confirm('EXIFに撮影方位がありません。地図上での方位を正確に出すにはカメラ方位を入力する必要があります。今入力しますか？');
+    if(ok){
+      const v = prompt('カメラ方位を度で入力（北=0、時計回り）:');
+      camHeading = parseFloat(v);
+    }
+  }
+  if(isNaN(camHeading)){
+    alert('カメラ方位が不明です。処理を中止します。');
+    return;
+  }
+
+  // compute absolute bearing to point2: bearing_point2 = camHeading + angle2
+  const ang2 = clicks[1].angle;
+  const absoluteBearing = (camHeading + ang2 + 360) % 360;
+
+  // draw 150 km line
+  const dist = 150000; // meters
+  drawDirectionLine(lat, lon, absoluteBearing, dist);
+});
+
+function drawDirectionLine(lat, lon, bearingDeg, dist){
+  dirLayerGroup.clearLayers();
+  // geodesic end point
   const R = 6371000;
   const brng = bearingDeg * Math.PI/180;
   const lat1 = lat * Math.PI/180;
@@ -119,13 +253,17 @@ function drawDirectionLine(lat, lon, bearingDeg, dist=150000) {
     Math.sin(brng)*Math.sin(dist/R)*Math.cos(lat1),
     Math.cos(dist/R)-Math.sin(lat1)*Math.sin(lat2)
   );
-  const endLat = lat2 * 180/Math.PI;
-  const endLon = lon2 * 180/Math.PI;
+  const endLat = lat2 * 180/Math.PI, endLon = lon2 * 180/Math.PI;
 
-  L.polyline([[lat, lon], [endLat, endLon]], {color: 'red'}).addTo(map);
-  L.marker([lat, lon]).addTo(map).bindPopup('撮影位置');
-  L.marker([endLat, endLon]).addTo(map).bindPopup(`2点目方向 (${bearingDeg.toFixed(1)}°)`);
-  map.setView([lat, lon], 8);
+  L.polyline([[lat, lon], [endLat, endLon]], {color: 'red', weight: 3}).addTo(dirLayerGroup);
+  L.marker([endLat, endLon]).addTo(dirLayerGroup).bindPopup('方位線終点');
+  map.fitBounds([[lat, lon],[endLat, endLon]], {padding:[50,50]});
+
+  // show computed info
+  L.popup()
+    .setLatLng([lat, lon])
+    .setContent('<b>基準点</b><br>Lat:' + lat.toFixed(6) + '<br>Lon:' + lon.toFixed(6) + '<br>方位: ' + bearingDeg.toFixed(2) + '°')
+    .openOn(map);
 }
 </script>
 </body>
