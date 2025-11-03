@@ -68,15 +68,12 @@
         const latRef = EXIF.getTag(this, 'GPSLatitudeRef') || 'N';
         const lonRef = EXIF.getTag(this, 'GPSLongitudeRef') || 'E';
         if (lat && lon) {
-          // EXIF returns rationals sometimes
-          function toNum(v){ return (v[0].numerator ? v.map(x=>x.numerator/x.denominator) : v); }
+          function toNum(v){ return (v[0] && v[0].numerator!==undefined) ? v.map(x=>x.numerator/x.denominator) : v; }
           const la = toNum(lat), lo = toNum(lon);
           photoLat = (la[0] + la[1] / 60 + la[2] / 3600) * (latRef === 'S' ? -1 : 1);
           photoLon = (lo[0] + lo[1] / 60 + lo[2] / 3600) * (lonRef === 'W' ? -1 : 1);
           map.setView([photoLat, photoLon], 12);
           L.marker([photoLat, photoLon]).addTo(map).bindPopup('📷 撮影位置');
-        } else {
-          // keep default center
         }
         const f35 = EXIF.getTag(this, 'FocalLengthIn35mmFilm');
         if(f35) focal35 = parseFloat(f35);
@@ -85,7 +82,6 @@
       const reader = new FileReader();
       reader.onload = ev => {
         img.onload = () => {
-          // scale canvas for mobile display but keep coordinate mapping
           const maxDisplayW = Math.min(window.innerWidth * 0.95, 800);
           const aspect = img.naturalWidth ? img.naturalHeight / img.naturalWidth : 0.75;
           canvas.width = Math.round(maxDisplayW);
@@ -105,7 +101,7 @@
       if(points.length >= 2) points = [];
       points.push({x, y});
       drawImageWithMarkers();
-      if (points.length === 2) calculateAngle();
+      if (points.length === 2) calculateAngleAndShow();
     });
 
     function drawImageWithMarkers(){
@@ -121,7 +117,7 @@
     let camAngles = {a1:0, a2:0};
     let relativeAngle = null;
 
-    function calculateAngle(){
+    function calculateAngleAndShow(){
       // compute horizontal FOV from 35mm equivalent focal length
       const f35 = focal35 || 28; // fallback
       const hfov = 2 * Math.atan(36 / (2 * f35)); // radians (full-frame)
@@ -131,8 +127,19 @@
       const ang1 = Math.atan2(x1 - cx, fx_pixels) * 180 / Math.PI; // deg, right positive
       const ang2 = Math.atan2(x2 - cx, fx_pixels) * 180 / Math.PI;
       camAngles.a1 = ang1; camAngles.a2 = ang2;
-      relativeAngle = ang2 - ang1; // point2 relative to point1
-      alert(`点1角度: ${ang1.toFixed(3)}°, 点2角度: ${ang2.toFixed(3)}°, 相対角: ${relativeAngle.toFixed(3)}°`);
+      relativeAngle = ang2 - ang1; // point2 relative to point1 (right positive)
+      // show only the horizontal angle between the two points as requested
+      alert(Math.round(relativeAngle*1000)/1000 + '°');
+    }
+
+    function computeGeoBearing(lat1, lon1, lat2, lon2){
+      // returns bearing from point1 to point2 in degrees (north=0, cw)
+      const φ1 = lat1 * Math.PI/180; const φ2 = lat2 * Math.PI/180;
+      const λ1 = lon1 * Math.PI/180; const λ2 = lon2 * Math.PI/180;
+      const y = Math.sin(λ2-λ1)*Math.cos(φ2);
+      const x = Math.cos(φ1)*Math.sin(φ2) - Math.sin(φ1)*Math.cos(φ2)*Math.cos(λ2-λ1);
+      const θ = Math.atan2(y,x);
+      return (θ*180/Math.PI + 360) % 360;
     }
 
     function drawDirectionLine(lat, lon, bearing, lengthMeters) {
@@ -151,13 +158,14 @@
     map.on('click', e => {
       if (points.length < 2) { alert('まず画像上で2点を指定してください'); return; }
       if (photoLat == null || photoLon == null) { alert('撮影位置がEXIFにありません'); return; }
-      // Use camera heading (gpsImgDir) as heading of image center
-      const camHeading = gpsImgDir || 0;
-      // Absolute bearing to point2 should be camHeading + angle_of_point2
-      const absoluteBearing = (camHeading + camAngles.a2 + 360) % 360;
+      // Compute geodesic bearing from photo location to the user-specified ground point (which corresponds to image point1)
+      const userLat = e.latlng.lat; const userLon = e.latlng.lng;
+      const bearingPhotoToP1 = computeGeoBearing(photoLat, photoLon, userLat, userLon);
+      // absolute bearing to point2 = bearing_photo->p1 + (ang2 - ang1)
+      const absoluteBearing = (bearingPhotoToP1 + (camAngles.a2 - camAngles.a1) + 360) % 360;
       drawDirectionLine(photoLat, photoLon, absoluteBearing, 150000);
       // mark the user-chosen map point (point1 location)
-      L.marker([e.latlng.lat, e.latlng.lng]).addTo(map).bindPopup('点1の地上位置').openPopup();
+      L.marker([userLat, userLon]).addTo(map).bindPopup('点1の地上位置').openPopup();
     });
 
     document.getElementById('resetPoints').addEventListener('click', () => {
