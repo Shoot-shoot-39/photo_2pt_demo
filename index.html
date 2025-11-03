@@ -1,239 +1,132 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>写真上の2点の水平角（JPEG EXIF利用）</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:18px}
-    h1{font-size:20px;margin-bottom:6px}
-    #canvasWrap{position:relative;display:inline-block;border:1px solid #ddd}
-    canvas{display:block;max-width:100%;height:auto}
-    .marker{position:absolute;width:12px;height:12px;border-radius:50%;transform:translate(-50%,-50%);pointer-events:none}
-    #controls{margin-top:12px}
-    label{display:inline-block;margin-right:8px}
-    input[type=number]{width:100px}
-    .info{margin-top:8px;color:#333}
-    .small{font-size:13px;color:#555}
-    button{margin-left:6px}
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>写真から方位線を描画（地理院地図連動）</title>
+<style>
+  body { font-family: sans-serif; margin: 1em; }
+  #canvasContainer { position: relative; }
+  canvas { max-width: 100%; border: 1px solid #ccc; cursor: crosshair; }
+  #map { height: 500px; margin-top: 1em; }
+</style>
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
 </head>
 <body>
-  <h1>写真上の2点の水平角を求めるツール</h1>
-  <p class="small">iPhone 等で撮った JPEG をアップロード → 画像上で 2 点クリック → EXIF の撮影方位（あれば）と焦点情報から水平角差を計算します。EXIF に方位が無い場合は手動でカメラ方位を入力してください。</p>
+<h2>📷 写真から方位線を描画（地理院地図連動）</h2>
+<input type="file" id="fileInput" accept="image/*"><br><br>
+<canvas id="photoCanvas"></canvas>
+<div id="map"></div>
 
-  <input id="file" type="file" accept="image/*" />
-  <div id="canvasWrap" style="margin-top:12px">
-    <canvas id="canvas"></canvas>
-  </div>
+<script>
+const canvas = document.getElementById('photoCanvas');
+const ctx = canvas.getContext('2d');
+let img = new Image();
+let points = [];
+let exifData = {};
+let photoLat = null, photoLon = null, photoDir = null, focal35 = null;
 
-  <div id="controls">
-    <div>
-      <label>カメラ方位（北=0°, 時計回り）:</label>
-      <input id="headingInput" type="number" step="0.1" placeholder="EXIF が無ければ入力" />
-      <span id="headingFromExif" class="small"></span>
-    </div>
-    <div style="margin-top:6px">
-      <label>35mm換算焦点距離 (mm)：</label>
-      <input id="f35" type="number" step="0.1" placeholder="EXIFにあれば自動" />
-      <label style="margin-left:10px">またはセンサー幅 (mm)：</label>
-      <input id="sensorW" type="number" step="0.01" placeholder="例: 4.80 (調整可)" />
-      <button id="resetBtn">リセット</button>
-    </div>
+// Leaflet 地理院地図初期化
+const map = L.map('map').setView([35.681236, 139.767125], 5);
+L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+  attribution: '地理院地図'
+}).addTo(map);
 
-    <div class="info" id="resultArea"></div>
-  </div>
-
-  <script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
-  <script>
-  // Utility: convert EXIF GPS rationals to decimal
-  function dmsToDeg(dms, ref){
-    if(!dms) return null;
-    const [deg, min, sec] = dms.map(function(r){ return r.numerator / r.denominator; });
-    let val = deg + min/60 + sec/3600;
-    if(ref === 'S' || ref === 'W') val = -val;
-    return val;
-  }
-
-  const fileInput = document.getElementById('file');
-  const canvas = document.getElementById('canvas');
-  const ctx = canvas.getContext('2d');
-  const wrap = document.getElementById('canvasWrap');
-  const headingInput = document.getElementById('headingInput');
-  const headingFromExif = document.getElementById('headingFromExif');
-  const f35Input = document.getElementById('f35');
-  const sensorInput = document.getElementById('sensorW');
-  const resultArea = document.getElementById('resultArea');
-  const resetBtn = document.getElementById('resetBtn');
-
-  let img = new Image();
-  let imgW=0, imgH=0; // natural size
-  let clicks = [];
-  let exifData = {};
-
-  function resetAll(){
-    clicks = [];
-    resultArea.innerHTML = '';
-    headingFromExif.textContent = '';
-    headingInput.value = '';
-    f35Input.value = '';
-    sensorInput.value = '';
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-  }
-
-  resetBtn.addEventListener('click', resetAll);
-
-  fileInput.addEventListener('change', (e)=>{
-    resetAll();
-    const f = e.target.files[0];
-    if(!f) return;
-    const reader = new FileReader();
-    reader.onload = function(ev){
-      img.onload = function(){
-        imgW = img.naturalWidth; imgH = img.naturalHeight;
-        // set canvas to natural size but scale with CSS for responsiveness
-        canvas.width = imgW; canvas.height = imgH;
-        canvas.style.width = Math.min(800, imgW) + 'px';
-        ctx.drawImage(img, 0, 0);
-      }
-      img.src = ev.target.result;
-
-      // read EXIF
-      EXIF.getData(f, function(){
-        exifData = EXIF.getAllTags(this) || {};
-        // GPS
-        if(exifData.GPSLatitude && exifData.GPSLongitude){
-          const lat = dmsToDeg(exifData.GPSLatitude, exifData.GPSLatitudeRef);
-          const lon = dmsToDeg(exifData.GPSLongitude, exifData.GPSLongitudeRef);
-          resultArea.innerHTML = '<b>撮影位置（GPS）:</b> ' + lat.toFixed(6) + ', ' + lon.toFixed(6) + '<br>';
-        }
-        // heading
-        // common EXIF tags: GPSImgDirection, ImageDirection, GPSDestBearing
-        const headingTag = exifData.GPSImgDirection || exifData.GPSDestBearing || exifData.ImageDirection;
-        if(headingTag){
-          // GPSImgDirection may be an object with numerator/denominator
-          let h = headingTag;
-          if(typeof h === 'object' && h.numerator!==undefined){ h = h.numerator / h.denominator; }
-          headingFromExif.textContent = '（EXIF 方位: ' + Number(h).toFixed(1) + '° を使用）';
-          headingInput.value = Number(h).toFixed(1);
-        }
-
-        // focal length
-        if(exifData.FocalLengthIn35mmFilm){
-          f35Input.value = exifData.FocalLengthIn35mmFilm;
-        } else if(exifData.FocalLength){
-          // FocalLength often in rational form
-          let fl = exifData.FocalLength;
-          if(typeof fl === 'object' && fl.numerator!==undefined){ fl = fl.numerator / fl.denominator; }
-          // we don't know sensor size -> allow user to set sensor width
-          // leave f35 blank in this case
-          // but prefill sensor with a typical small-phone value for convenience
-          sensorInput.value = sensorInput.value || 4.8;
-          // show it in note
-          resultArea.innerHTML += '<span class="small">EXIF 焦点距離(mm): ' + fl + '. 35mm 換算が無ければセンサー幅を入力してください（例: 4.8 mm）。</span><br>';
-        }
-      });
+// ファイル選択時
+fileInput.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(evt) {
+    img.onload = function() {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
     }
-    reader.readAsDataURL(f);
+    img.src = evt.target.result;
+  }
+  reader.readAsDataURL(file);
+
+  EXIF.getData(file, function() {
+    exifData = EXIF.getAllTags(this);
+    photoLat = EXIF.getTag(this, 'GPSLatitude');
+    photoLon = EXIF.getTag(this, 'GPSLongitude');
+    photoDir = EXIF.getTag(this, 'GPSImgDirection');
+    focal35 = EXIF.getTag(this, 'FocalLengthIn35mmFilm');
+
+    function toDeg(arr, ref) {
+      if (!arr) return null;
+      let deg = arr[0] + arr[1]/60 + arr[2]/3600;
+      if (ref === 'S' || ref === 'W') deg *= -1;
+      return deg;
+    }
+
+    const latRef = EXIF.getTag(this, 'GPSLatitudeRef');
+    const lonRef = EXIF.getTag(this, 'GPSLongitudeRef');
+    photoLat = toDeg(photoLat, latRef);
+    photoLon = toDeg(photoLon, lonRef);
+
+    console.log('EXIF:', {photoLat, photoLon, photoDir, focal35});
   });
+});
 
-  // handle clicks on canvas
-  canvas.addEventListener('click', function(e){
-    if(!img.src) return;
-    // calculate image coordinate relative to natural image size
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const x = Math.round((e.clientX - rect.left) * scaleX);
-    const y = Math.round((e.clientY - rect.top) * scaleY);
-    clicks.push({x,y});
-    drawMarkers();
-    if(clicks.length === 2) calcAngle();
-    if(clicks.length > 2) { clicks = [clicks[clicks.length-2], clicks[clicks.length-1]]; drawMarkers(); calcAngle(); }
-  });
+canvas.addEventListener('click', e => {
+  if (!img.src) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  points.push({x, y});
 
-  function drawMarkers(){
-    // redraw image then markers
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-    ctx.drawImage(img,0,0);
-    ctx.save();
-    clicks.forEach(function(pt,i){
-      // circle
-      ctx.beginPath();
-      ctx.fillStyle = i===0? 'rgba(255,0,0,0.8)':'rgba(0,120,255,0.9)';
-      ctx.arc(pt.x, pt.y, Math.max(6, canvas.width/200), 0, Math.PI*2);
-      ctx.fill();
-      ctx.font = '20px sans-serif';
-      ctx.fillStyle = '#fff';
-      ctx.fillText(String(i+1), pt.x-6, pt.y+6);
-    });
-    ctx.restore();
+  ctx.drawImage(img, 0, 0);
+  ctx.fillStyle = 'red';
+  points.forEach(p => ctx.fillRect(p.x-4, p.y-4, 8, 8));
+
+  if (points.length === 2) {
+    calcAndDrawDirection();
+  }
+});
+
+function calcAndDrawDirection() {
+  const dx = points[1].x - points[0].x;
+  const dy = points[1].y - points[0].y;
+  const anglePx = Math.atan2(-dx, -dy) * 180 / Math.PI; // 画像上の角度
+
+  let bearing = 0;
+  if (photoDir != null) {
+    bearing = (photoDir + anglePx + 360) % 360;
+  } else {
+    bearing = (anglePx + 360) % 360;
   }
 
-  // main calculation
-  function calcAngle(){
-    resultArea.innerHTML = '';
-    if(clicks.length < 2) return;
-    // get hfov
-    let hfovDeg = null;
-    const f35 = parseFloat(f35Input.value);
-    const sensorW = parseFloat(sensorInput.value);
-    if(!isNaN(f35)){
-      // use 35mm equivalent
-      hfovDeg = 2 * (180/Math.PI) * Math.atan(36 / (2 * f35));
-      resultArea.innerHTML += '<b>水平画角 (35mm換算):</b> ' + hfovDeg.toFixed(2) + '°<br>';
-    } else if(!isNaN(sensorW) && exifData.FocalLength){
-      let fl = exifData.FocalLength;
-      if(typeof fl === 'object' && fl.numerator!==undefined) fl = fl.numerator / fl.denominator;
-      const f_mm = parseFloat(fl);
-      if(!isNaN(f_mm)){
-        hfovDeg = 2 * (180/Math.PI) * Math.atan(sensorW / (2 * f_mm));
-        resultArea.innerHTML += '<b>水平画角 (計算):</b> ' + hfovDeg.toFixed(2) + '° (センサー幅 ' + sensorW + ' mm, 焦点距離 ' + f_mm + ' mm)<br>';
-      }
-    }
-    if(!hfovDeg){
-      resultArea.innerHTML += '<span class="small">水平画角を決定できません。35mm換算焦点距離かセンサー幅を入力してください。</span>';
-      return;
-    }
-
-    // compute focal in pixels: fx_pixels = image_width / (2 * tan(hfov/2))
-    const hfov = hfovDeg * Math.PI/180;
-    const fx_pixels = canvas.width / (2 * Math.tan(hfov/2));
-    const cx = canvas.width/2;
-
-    function pixelAngleX(u){
-      const x = (u - cx);
-      return Math.atan(x / fx_pixels) * 180/Math.PI; // degrees, positive means to the right
-    }
-
-    const a1 = pixelAngleX(clicks[0].x);
-    const a2 = pixelAngleX(clicks[1].x);
-
-    // get camera heading (north=0 CW)
-    let camHeading = parseFloat(headingInput.value);
-    if(isNaN(camHeading)){
-      resultArea.innerHTML += '<span class="small">カメラ方位が不明のため、相対角度（カメラ前方を0とした左右差）を出します。</span><br>';
-      // relative angle difference
-      const diff = (a2 - a1);
-      resultArea.innerHTML += '<b>相対水平角差:</b> ' + diff.toFixed(3) + '° (前方を0とした差)<br>';
-      return;
-    }
-
-    // absolute bearings of each clicked point (north=0 cw)
-    // we define pointBearing = camHeading + pixelAngleX
-    const b1 = (camHeading + a1 + 360) % 360;
-    const b2 = (camHeading + a2 + 360) % 360;
-    // difference shortest
-    let delta = (b2 - b1 + 540) % 360 - 180;
-
-    resultArea.innerHTML += '<b>カメラ方位:</b> ' + camHeading.toFixed(2) + '°<br>';
-    resultArea.innerHTML += '<b>点1 方位:</b> ' + b1.toFixed(3) + '° , <b>点2 方位:</b> ' + b2.toFixed(3) + '°<br>';
-    resultArea.innerHTML += '<b>水平角差 (短角):</b> ' + delta.toFixed(3) + '°<br>';
-
-    // show note about pitch/roll
-    resultArea.innerHTML += '<div class="small">注意: カメラのピッチ/ロール（上下/傾き）や被写体の高さ差を無視した計算です。より正確にするには画像の回転(ロール)補正とピッチ情報が必要です。</div>';
+  if (photoLat && photoLon) {
+    drawDirectionLine(photoLat, photoLon, bearing, 150000); // 150km
+  } else {
+    alert('EXIFにGPS情報がありません');
   }
 
-  </script>
+  points = [];
+}
+
+function drawDirectionLine(lat, lon, bearingDeg, dist=150000) {
+  const R = 6371000;
+  const brng = bearingDeg * Math.PI/180;
+  const lat1 = lat * Math.PI/180;
+  const lon1 = lon * Math.PI/180;
+  const lat2 = Math.asin(Math.sin(lat1)*Math.cos(dist/R) + Math.cos(lat1)*Math.sin(dist/R)*Math.cos(brng));
+  const lon2 = lon1 + Math.atan2(
+    Math.sin(brng)*Math.sin(dist/R)*Math.cos(lat1),
+    Math.cos(dist/R)-Math.sin(lat1)*Math.sin(lat2)
+  );
+  const endLat = lat2 * 180/Math.PI;
+  const endLon = lon2 * 180/Math.PI;
+
+  L.polyline([[lat, lon], [endLat, endLon]], {color: 'red'}).addTo(map);
+  L.marker([lat, lon]).addTo(map).bindPopup('撮影位置');
+  L.marker([endLat, endLon]).addTo(map).bindPopup(`2点目方向 (${bearingDeg.toFixed(1)}°)`);
+  map.setView([lat, lon], 8);
+}
+</script>
 </body>
 </html>
