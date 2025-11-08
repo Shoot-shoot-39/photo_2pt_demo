@@ -17,8 +17,10 @@
   </style>
 </head>
 <body>
-  <h2>📸 写真方位線ツール（撮影位置固定＋高解像度対応）</h2>
-
+  <h2>📸 写真から方位線</h2>
+  <div id="info">
+    画像をアップロードし、<b>既知点、未知点の順に2点</b>をタップしてください。<br>
+  </div>
   <input type="file" id="photoInput" accept="image/*"><br>
 
   <div id="imageContainer">
@@ -26,15 +28,13 @@
   </div>
 
   <div id="controls">
-    <button id="resetPoints">画像上の点リセット</button>
-    <button id="clearMap">地図線クリア</button>
+    <button id="resetPoints">点選択リセット</button>
+    <button id="clearMap">方角線クリア</button>
     <button id="fullReset">🧹 全リセット</button>
   </div>
 
-  <div id="info">
-    画像をアップロードし、<b>2点</b>をタップして相対角度を求めてください。<br>
-    地図は撮影位置を中心に表示します。<br>
-    地図上をタップして、<b>1点目の位置</b>を指定すると150km方位線を描きます。
+  <div id="info2">
+    <b>既知点</b>の位置を地図上をタップしてください。<br>
   </div>
 
   <div id="map"></div>
@@ -160,7 +160,7 @@
       // 修正版：相対角度の符号を正しく扱う
       const absoluteBearing = (bearingPhotoToP1 - (camAngles.a1 - camAngles.a2) + 360) % 360;
       drawDirectionLine(photoLat, photoLon, absoluteBearing, 150000);
-      const m = L.marker([userLat, userLon]).addTo(map).bindPopup('点1の地上位置').openPopup();
+      const m = L.marker([userLat, userLon]).addTo(map).bindPopup('既知点').openPopup();
       markers.push(m);
     });
 
